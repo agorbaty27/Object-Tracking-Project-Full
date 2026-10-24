@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>servo pid tuner</title>
+<style>
+* { box-sizing:border-box; margin:0; padding:0; }
+:root {
+  --bg:#0d0d0f; --surface:#16161a; --surface2:#1e1e24;
+  --border:rgba(255,255,255,0.08); --border2:rgba(255,255,255,0.14);
+  --text:#f0eee8; --muted:#888780;
+  --accent:#5DCAA5; --accent2:#1D9E75;
+  --warn:#EF9F27; --danger:#E24B4A; --info:#378ADD; --manual:#EF9F27;
+  --s3c:#AFA9EC; --s4c:#F0997B; --s5c:#ED93B1; --s6c:#9FE1CB;
+  --radius:10px; --font:'JetBrains Mono','Fira Code',monospace;
+}
+body { background:var(--bg); color:var(--text); font-family:var(--font); font-size:13px; min-height:100vh; padding:24px; }
+
+header { display:flex; align-items:center; gap:16px; margin-bottom:24px; flex-wrap:wrap; }
+header h1 { font-size:18px; font-weight:500; letter-spacing:-0.02em; }
+
+.status-dot { width:8px; height:8px; border-radius:50%; background:var(--danger); display:inline-block; margin-right:6px; transition:background 0.3s; }
+.status-dot.ok { background:var(--accent); box-shadow:0 0 6px var(--accent2); }
+.status-label { font-size:12px; color:var(--muted); }
+
+.tracking-badge { display:inline-flex; align-items:center; gap:6px; padding:4px 12px; border-radius:20px; font-size:11px; font-weight:500; background:var(--surface2); color:var(--muted); border:0.5px solid var(--border); transition:all 0.3s; }
+.tracking-badge.active { background:rgba(93,202,165,0.12); color:var(--accent); border-color:rgba(93,202,165,0.3); }
+.tracking-badge.manual-active { background:rgba(239,159,39,0.12); color:var(--manual); border-color:rgba(239,159,39,0.3); }
+
+.mode-toggle { margin-left:auto; display:flex; align-items:center; gap:10px; background:var(--surface); border:0.5px solid var(--border2); border-radius:20px; padding:5px 14px; font-size:12px; cursor:pointer; color:var(--muted); transition:all 0.2s; user-select:none; }
+.mode-toggle:hover { border-color:var(--manual); color:var(--manual); }
+.mode-toggle.active { background:rgba(239,159,39,0.12); border-color:rgba(239,159,39,0.4); color:var(--manual); }
+.toggle-pip { width:28px; height:16px; border-radius:8px; background:var(--surface2); border:0.5px solid var(--border2); position:relative; transition:background 0.2s; }
+.mode-toggle.active .toggle-pip { background:rgba(239,159,39,0.3); }
+.toggle-pip::after { content:''; position:absolute; width:10px; height:10px; border-radius:50%; background:var(--muted); top:2px; left:2px; transition:transform 0.2s,background 0.2s; }
+.mode-toggle.active .toggle-pip::after { transform:translateX(12px); background:var(--manual); }
+
+.outer { display:flex; gap:16px; max-width:1280px; align-items:flex-start; }
+.left  { flex:1; min-width:0; }
+.right { width:320px; flex-shrink:0; display:flex; flex-direction:column; gap:16px; }
+.grid  { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+
+.card { background:var(--surface); border:0.5px solid var(--border); border-radius:var(--radius); padding:20px 22px; }
+.card.manual-card { border-color:rgba(239,159,39,0.25); }
+.card.arm-card    { border-color:rgba(175,169,236,0.25); }
+.card h2 { font-size:11px; font-weight:500; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); margin-bottom:18px; }
+
+.param-row { display:flex; align-items:center; gap:12px; margin-bottom:14px; }
+.param-row label { width:80px; color:var(--muted); font-size:12px; flex-shrink:0; }
+.param-row input[type=range] { flex:1; -webkit-appearance:none; height:3px; background:var(--surface2); border-radius:2px; outline:none; cursor:pointer; border:none; }
+.param-row input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:var(--accent); cursor:pointer; border:2px solid var(--bg); }
+.param-row input[type=number] { width:68px; background:var(--surface2); border:0.5px solid var(--border2); border-radius:6px; color:var(--text); font-family:var(--font); font-size:12px; padding:4px 8px; text-align:right; outline:none; }
+.param-row input[type=number]:focus { border-color:var(--accent); }
+.pid-section { transition:opacity 0.2s; }
+.pid-section.dimmed { opacity:0.35; pointer-events:none; }
+
+/* Joystick */
+.joystick-wrap { display:flex; gap:20px; align-items:flex-start; margin-top:4px; }
+.joystick-pad { width:130px; height:130px; flex-shrink:0; background:var(--surface2); border-radius:12px; border:0.5px solid var(--border2); position:relative; cursor:crosshair; touch-action:none; }
+.joystick-pad::before { content:''; position:absolute; left:50%; top:0; width:1px; height:100%; background:rgba(255,255,255,0.04); }
+.joystick-pad::after  { content:''; position:absolute; left:0; top:50%; width:100%; height:1px; background:rgba(255,255,255,0.04); }
+.joystick-thumb { position:absolute; width:18px; height:18px; border-radius:50%; background:var(--manual); border:2px solid var(--bg); transform:translate(-50%,-50%); left:50%; top:50%; pointer-events:none; box-shadow:0 0 8px rgba(239,159,39,0.4); }
+.joystick-sliders { flex:1; display:flex; flex-direction:column; gap:14px; }
+.axis-label { font-size:10px; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); margin-bottom:4px; }
+.slider-row { display:flex; align-items:center; gap:10px; }
+.slider-row input[type=range] { flex:1; -webkit-appearance:none; height:3px; background:var(--surface2); border-radius:2px; outline:none; cursor:pointer; border:none; }
+.sval { font-size:12px; min-width:36px; text-align:right; }
+
+/* Arm joints */
+.joint-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.joint-cell { background:var(--surface2); border-radius:8px; padding:12px 14px; }
+.joint-cell .jlabel { font-size:10px; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; }
+.joint-cell .jval { font-size:14px; font-weight:500; }
+.joint-cell input[type=range] { width:100%; -webkit-appearance:none; height:3px; background:var(--bg); border-radius:2px; outline:none; cursor:pointer; border:none; margin-top:4px; }
+
+/* Claw visual */
+.claw-vis { display:flex; align-items:center; justify-content:center; gap:0; margin-top:8px; height:32px; }
+.claw-finger { width:8px; background:var(--s6c); border-radius:3px; transition:height 0.15s, margin 0.15s; }
+
+/* Send / center buttons */
+.send-btn { margin-top:18px; width:100%; padding:10px; background:transparent; border:0.5px solid var(--border2); border-radius:8px; color:var(--text); font-family:var(--font); font-size:12px; cursor:pointer; letter-spacing:0.03em; transition:background 0.15s,border-color 0.15s; }
+.send-btn:hover { background:var(--surface2); border-color:var(--accent); color:var(--accent); }
+.send-btn:active { transform:scale(0.98); }
+.save-indicator { font-size:11px; color:var(--accent); opacity:0; transition:opacity 0.3s; margin-left:8px; }
+.center-btn { margin-top:12px; width:100%; padding:8px; background:transparent; border:0.5px solid rgba(239,159,39,0.3); border-radius:8px; color:var(--manual); font-family:var(--font); font-size:12px; cursor:pointer; transition:background 0.15s; }
+.center-btn:hover { background:rgba(239,159,39,0.08); }
+.center-btn:active { transform:scale(0.98); }
+
+.range-pair { display:flex; gap:8px; align-items:center; }
+.range-pair input[type=number] { width:54px; background:var(--surface2); border:0.5px solid var(--border2); border-radius:6px; color:var(--text); font-family:var(--font); font-size:12px; padding:4px 8px; text-align:right; outline:none; }
+.range-pair span { color:var(--muted); font-size:11px; }
+
+/* Live position */
+.servo-display { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.servo-card { background:var(--surface2); border-radius:8px; padding:12px 14px; text-align:center; }
+.servo-card .axis { font-size:10px; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); margin-bottom:4px; }
+.servo-card .angle { font-size:22px; font-weight:500; letter-spacing:-0.03em; line-height:1; }
+.servo-card .unit { font-size:10px; color:var(--muted); margin-top:2px; }
+.arc-wrap svg { width:100%; overflow:visible; margin-top:10px; }
+
+/* 3D card */
+#arm-canvas { display:block; width:100%; border-radius:8px; cursor:grab; }
+#arm-canvas:active { cursor:grabbing; }
+.orbit-hint { font-size:10px; color:var(--muted); text-align:center; margin-top:6px; letter-spacing:0.04em; }
+
+/* Calibration */
+.cal-row { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+.cal-row label { width:90px; font-size:12px; color:var(--muted); flex-shrink:0; }
+.cal-row input[type=range] { flex:1; -webkit-appearance:none; height:3px; background:var(--surface2); border-radius:2px; outline:none; cursor:pointer; border:none; }
+.cal-row input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:#9FE1CB; cursor:pointer; border:2px solid var(--bg); }
+.cal-val { font-size:12px; min-width:40px; text-align:right; color:#9FE1CB; }
+.reset-cal { width:100%; padding:7px; background:transparent; border:0.5px solid var(--border2); border-radius:8px; color:var(--muted); font-family:var(--font); font-size:11px; cursor:pointer; margin-top:4px; transition:background 0.15s; }
+.reset-cal:hover { background:var(--surface2); color:var(--text); }
+
+/* Coordinates */
+.coord-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; margin-bottom:12px; }
+.coord-cell { background:var(--surface2); border-radius:8px; padding:10px 8px; text-align:center; }
+.coord-cell .clbl { font-size:10px; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:4px; }
+.cx { color:#E24B4A; } .cy { color:#5DCAA5; } .cz { color:#378ADD; }
+.coord-cell .cval { font-size:16px; font-weight:500; color:var(--text); }
+.coord-cell .cunit { font-size:10px; color:var(--muted); margin-top:2px; }
+.coord-dist { display:flex; justify-content:space-between; align-items:center; padding:8px 10px; background:var(--surface2); border-radius:8px; margin-bottom:12px; }
+.coord-dist .dl { font-size:11px; color:var(--muted); }
+.coord-dist .dv { font-size:14px; font-weight:500; color:var(--warn); }
+.scale-row { display:flex; align-items:center; gap:8px; }
+.scale-row label { font-size:11px; color:var(--muted); flex-shrink:0; }
+.scale-row input[type=number] { width:60px; background:var(--surface2); border:0.5px solid var(--border2); border-radius:6px; color:var(--text); font-family:var(--font); font-size:12px; padding:4px 8px; text-align:right; outline:none; }
+.scale-row span { font-size:11px; color:var(--muted); }
+
+/* Log */
+.log-section { max-width:1280px; margin-top:16px; }
+.log-box { background:var(--surface); border:0.5px solid var(--border); border-radius:var(--radius); padding:14px 16px; height:90px; overflow-y:auto; font-size:11px; color:var(--muted); line-height:1.7; }
+.log-box .tag { color:var(--accent); margin-right:6px; }
+.log-box .tag.w { color:var(--warn); }
+.log-box .tag.e { color:var(--danger); }
+
+@media(max-width:960px){ .outer{flex-direction:column;} .right{width:100%;} }
+@media(max-width:560px){ .grid{grid-template-columns:1fr;} .joint-grid{grid-template-columns:1fr;} }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>servo pid tuner</h1>
+  <div><span class="status-dot" id="dot"></span><span class="status-label" id="conn-label">connecting...</span></div>
+  <div class="tracking-badge" id="tracking-badge">
+    <span class="status-dot" style="width:6px;height:6px;" id="track-dot"></span>
+    <span id="track-label">no target</span>
+  </div>
+  <div class="mode-toggle" id="mode-toggle" onclick="toggleManual()">
+    <div class="toggle-pip"></div>
+    <span id="mode-label">manual mode</span>
+  </div>
+</header>
+
+<div class="outer">
+<div class="left">
+<div class="grid">
+
+  <!-- PID gains -->
+  <div class="card pid-section" id="pid-card">
+    <h2>pid gains</h2>
+    <div class="param-row"><label>Kp</label><input type="range" id="kp-slider" min="0" max="0.3" step="0.001" value="0.05"><input type="number" id="kp-num" step="0.001" min="0" max="0.3" value="0.05"></div>
+    <div class="param-row"><label>Kd</label><input type="range" id="kd-slider" min="0" max="0.1" step="0.001" value="0.01"><input type="number" id="kd-num" step="0.001" min="0" max="0.1" value="0.01"></div>
+    <div class="param-row"><label>deadzone</label><input type="range" id="dz-slider" min="0" max="80" step="1" value="15"><input type="number" id="dz-num" step="1" min="0" max="80" value="15"></div>
+    <div class="param-row">
+    <label>S3 ratio</label>
+  <input type="range" id="s3r-slider" min="0" max="1" step="0.01" value="0.5">
+  <input type="number" id="s3r-num" step="0.01" min="0" max="1" value="0.5">
+</div>
+<div class="param-row">
+  <label>S4 ratio</label>
+  <input type="range" id="s4r-slider" min="0" max="1" step="0.01" value="0.3">
+  <input type="number" id="s4r-num" step="0.01" min="0" max="1" value="0.3">
+</div>
+    <button class="send-btn" onclick="sendParams()">apply to tracker <span class="save-indicator" id="save-ok">saved</span></button>
+  </div>
+
+  <!-- Servo limits -->
+  <div class="card pid-section" id="limits-card">
+    <h2>servo limits</h2>
+    <div class="param-row"><label>pan (S1)</label><div class="range-pair"><input type="number" id="min-x" value="20" min="0" max="180"><span>to</span><input type="number" id="max-x" value="160" min="0" max="180"><span>°</span></div></div>
+    <div class="param-row"><label>tilt (S2)</label><div class="range-pair"><input type="number" id="min-y" value="40" min="0" max="180"><span>to</span><input type="number" id="max-y" value="140" min="0" max="180"><span>°</span></div></div>
+    <button class="send-btn" onclick="sendParams()">apply limits <span class="save-indicator" id="save-ok2">saved</span></button>
+  </div>
+
+  <!-- Manual control S1/S2 -->
+  <div class="card manual-card" id="manual-card" style="grid-column:span 2;">
+    <h2>pan / tilt manual — S1 · S2</h2>
+    <div class="joystick-wrap">
+      <div>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:8px;letter-spacing:0.08em;">DRAG TO MOVE</div>
+        <div class="joystick-pad" id="joystick-pad"><div class="joystick-thumb" id="joystick-thumb"></div></div>
+      </div>
+      <div class="joystick-sliders">
+        <div>
+          <div class="axis-label">pan S1</div>
+          <div class="slider-row">
+            <input type="range" id="man-x" min="0" max="180" step="1" value="90" style="--c:var(--manual);">
+            <span class="sval" style="color:var(--manual);" id="man-x-val">90°</span>
+          </div>
+        </div>
+        <div>
+          <div class="axis-label">tilt S2</div>
+          <div class="slider-row">
+            <input type="range" id="man-y" min="0" max="180" step="1" value="90">
+            <span class="sval" style="color:var(--manual);" id="man-y-val">90°</span>
+          </div>
+        </div>
+        <button class="center-btn" onclick="centerPanTilt()">center S1 + S2</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Arm joints S3-S6 — always active -->
+  <div class="card arm-card" style="grid-column:span 2;">
+    <h2>arm joints — S3 · S4 · S5 · S6</h2>
+    <div class="joint-grid">
+
+      <div class="joint-cell">
+        <div class="jlabel" style="color:var(--s3c);">
+          <span>elbow tilt  S3</span>
+          <span class="jval" id="s3-disp">90°</span>
+        </div>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">0° = down · 135° = up</div>
+        <input type="range" id="s3-slider" min="0" max="135" step="1" value="90"
+          style="--thumb:var(--s3c);"
+          oninput="onArmSlider('s3',this.value)">
+      </div>
+
+      <div class="joint-cell">
+        <div class="jlabel" style="color:var(--s4c);">
+          <span>wrist tilt  S4</span>
+          <span class="jval" id="s4-disp">90°</span>
+        </div>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">0° = neutral · 90° = down</div>
+        <input type="range" id="s4-slider" min="0" max="90" step="1" value="90"
+          oninput="onArmSlider('s4',this.value)">
+      </div>
+
+      <div class="joint-cell">
+        <div class="jlabel" style="color:var(--s5c);">
+          <span>claw rotate  S5</span>
+          <span class="jval" id="s5-disp">90°</span>
+        </div>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:4px;">0° ← · 180° →</div>
+        <input type="range" id="s5-slider" min="0" max="180" step="1" value="90"
+          oninput="onArmSlider('s5',this.value)">
+      </div>
+
+      <div class="joint-cell">
+        <div class="jlabel" style="color:var(--s6c);">
+          <span>claw grip  S6</span>
+          <span class="jval" id="s6-disp">0°</span>
+        </div>
+        <div class="claw-vis">
+          <div class="claw-finger" id="claw-a" style="height:24px;margin-right:6px;"></div>
+          <div style="width:6px;height:8px;background:var(--surface);border-radius:2px;"></div>
+          <div class="claw-finger" id="claw-b" style="height:24px;margin-left:6px;"></div>
+        </div>
+        <input type="range" id="s6-slider" min="0" max="90" step="1" value="0"
+          oninput="onArmSlider('s6',this.value)">
+      </div>
+
+    </div>
+    <button class="center-btn" onclick="centerArm()" style="margin-top:14px;">center all arm joints</button>
+  </div>
+
+  <!-- Live positions -->
+  <div class="card">
+    <h2>live position</h2>
+    <div class="servo-display">
+      <div class="servo-card"><div class="axis">pan S1</div><div class="angle" id="angle-x" style="color:var(--accent)">90</div><div class="unit">deg</div></div>
+      <div class="servo-card"><div class="axis">tilt S2</div><div class="angle" id="angle-y" style="color:var(--accent)">90</div><div class="unit">deg</div></div>
+      <div class="servo-card"><div class="axis">elbow S3</div><div class="angle" id="angle-s3" style="color:var(--s3c)">90</div><div class="unit">deg</div></div>
+      <div class="servo-card"><div class="axis">wrist S4</div><div class="angle" id="angle-s4" style="color:var(--s4c)">90</div><div class="unit">deg</div></div>
+      <div class="servo-card"><div class="axis">rotate S5</div><div class="angle" id="angle-s5" style="color:var(--s5c)">90</div><div class="unit">deg</div></div>
+      <div class="servo-card"><div class="axis">grip S6</div><div class="angle" id="angle-s6" style="color:var(--s6c)">0</div><div class="unit">deg</div></div>
+    </div>
+    <svg viewBox="0 0 260 70" preserveAspectRatio="xMidYMid meet" style="margin-top:10px;">
+      <text x="10"  y="14" font-size="9" fill="#888780" font-family="monospace">PAN</text>
+      <path id="arc-track-x" d="" stroke="#1e1e24" stroke-width="5" fill="none" stroke-linecap="round"/>
+      <path id="arc-fill-x"  d="" stroke="#5DCAA5" stroke-width="5" fill="none" stroke-linecap="round"/>
+      <text x="140" y="14" font-size="9" fill="#888780" font-family="monospace">TILT</text>
+      <path id="arc-track-y" d="" stroke="#1e1e24" stroke-width="5" fill="none" stroke-linecap="round"/>
+      <path id="arc-fill-y"  d="" stroke="#378ADD" stroke-width="5" fill="none" stroke-linecap="round"/>
+    </svg>
+  </div>
+
+  <!-- Error sparkline -->
+  <div class="card">
+    <h2>error signal</h2>
+    <canvas id="sparkline" width="340" height="130" style="width:100%;height:130px;"></canvas>
+  </div>
+
+</div><!-- /grid -->
+</div><!-- /left -->
+
+<!-- RIGHT column -->
+<div class="right">
+
+  <div class="card">
+    <h2>arm position</h2>
+    <canvas id="arm-canvas"></canvas>
+    <div class="orbit-hint">drag to orbit · scroll to zoom</div>
+  </div>
+
+  <div class="card">
+    <h2>camera coordinates</h2>
+    <div class="coord-grid">
+      <div class="coord-cell"><div class="clbl cx">X</div><div class="cval" id="coord-x">0.0</div><div class="cunit">cm</div></div>
+      <div class="coord-cell"><div class="clbl cy">Y</div><div class="cval" id="coord-y">0.0</div><div class="cunit">cm</div></div>
+      <div class="coord-cell"><div class="clbl cz">Z</div><div class="cval" id="coord-z">0.0</div><div class="cunit">cm</div></div>
+    </div>
+    <div class="coord-dist">
+      <span class="dl">distance from base</span>
+      <span class="dv"><span id="coord-dist">0.0</span> <span style="font-size:11px;color:var(--muted)">cm</span></span>
+    </div>
+    <div class="scale-row">
+      <label>1 unit =</label>
+      <input type="number" id="coord-scale" value="10" min="1" max="1000" step="1">
+      <span>cm</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>3d calibration</h2>
+    <div class="cal-row"><label>pan offset</label><input type="range" id="cal-pan" min="-90" max="90" step="1" value="0"><span class="cal-val" id="cal-pan-val">0°</span></div>
+    <div class="cal-row"><label>tilt offset</label><input type="range" id="cal-tilt" min="-90" max="90" step="1" value="0"><span class="cal-val" id="cal-tilt-val">0°</span></div>
+    <div class="cal-row"><label>upper arm</label><input type="range" id="cal-seg1" min="0.3" max="2.5" step="0.05" value="1.0"><span class="cal-val" id="cal-seg1-val">1.00</span></div>
+    <div class="cal-row"><label>elbow seg</label><input type="range" id="cal-seg2" min="0.3" max="2.5" step="0.05" value="1.05"><span class="cal-val" id="cal-seg2-val">1.05</span></div>
+    <div class="cal-row"><label>wrist seg</label><input type="range" id="cal-seg3" min="0.3" max="2.5" step="0.05" value="1.0"><span class="cal-val" id="cal-seg3-val">1.00</span></div>
+    <div class="cal-row"><label>claw seg</label><input type="range" id="cal-seg4" min="0.2" max="2.0" step="0.05" value="0.7"><span class="cal-val" id="cal-seg4-val">0.70</span></div>
+    <button class="reset-cal" onclick="resetCal()">reset calibration</button>
+  </div>
+
+</div><!-- /right -->
+</div><!-- /outer -->
+
+<div class="log-section">
+  <div class="log-box" id="logbox"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const API = 'http://localhost:5050';
+let errorHistory = {x:[],y:[]};
+const MAX_HIST = 80;
+let lastSX=90, lastSY=90;
+let isManual=false, manX=90, manY=90;
+let sendThrottle=null;
+// Current arm joint values (JS side)
+let curS3=90, curS4=90, curS5=90, curS6=0;
+
+// ---- Slider <-> number sync ----
+function linkSlider(s,n){
+  const sl=document.getElementById(s),nu=document.getElementById(n);
+  sl.addEventListener('input',()=>{nu.value=parseFloat(sl.value).toFixed(3);});
+  nu.addEventListener('input',()=>{sl.value=nu.value;});
+}
+linkSlider('kp-slider','kp-num'); linkSlider('kd-slider','kd-num'); linkSlider('dz-slider','dz-num');
+linkSlider('s3r-slider','s3r-num');
+linkSlider('s4r-slider','s4r-num');
+
+// ---- Calibration sliders ----
+function initCalSliders(){
+  ['pan','tilt'].forEach(k=>{
+    document.getElementById('cal-'+k).addEventListener('input',function(){
+      document.getElementById('cal-'+k+'-val').textContent=this.value+'°';
+    });
+  });
+  ['seg1','seg2','seg3','seg4'].forEach(k=>{
+    document.getElementById('cal-'+k).addEventListener('input',function(){
+      document.getElementById('cal-'+k+'-val').textContent=parseFloat(this.value).toFixed(2);
+      buildArm();
+    });
+  });
+}
+initCalSliders();
+
+function resetCal(){
+  const defs={pan:0,tilt:0,seg1:1.0,seg2:1.05,seg3:1.0,seg4:0.7};
+  Object.entries(defs).forEach(([k,v])=>{
+    document.getElementById('cal-'+k).value=v;
+    const isAngle=(k==='pan'||k==='tilt');
+    document.getElementById('cal-'+k+'-val').textContent=isAngle?v+'°':v.toFixed(2);
+  });
+  buildArm(); log('calibration reset');
+}
+
+// ---- Arm joint sliders ----
+const dispIds={s3:'s3-disp',s4:'s4-disp',s5:'s5-disp',s6:'s6-disp'};
+const angleIds={s3:'angle-s3',s4:'angle-s4',s5:'angle-s5',s6:'angle-s6'};
+
+function onArmSlider(servo, val){
+  val = parseFloat(val);
+  document.getElementById(dispIds[servo]).textContent = Math.round(val)+'°';
+  document.getElementById(angleIds[servo]).textContent = Math.round(val);
+  if(servo==='s3') curS3=val;
+  if(servo==='s4') curS4=val;
+  if(servo==='s5') curS5=val;
+  if(servo==='s6'){
+    curS6=val;
+    updateClawVis(val);
+  }
+  fetch(`${API}/arm`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({[servo]:val})});
+}
+
+function updateClawVis(val){
+  // val 0=closed, 90=open
+  const gap = Math.round(val/90*20);
+  document.getElementById('claw-a').style.height=(32-gap/2)+'px';
+  document.getElementById('claw-b').style.height=(32-gap/2)+'px';
+  document.getElementById('claw-a').style.marginRight=gap+'px';
+  document.getElementById('claw-b').style.marginLeft=gap+'px';
+}
+
+function centerArm(){
+  ['s3','s4','s5'].forEach(s=>{
+    document.getElementById(s+'-slider').value=90;
+    onArmSlider(s,90);
+  });
+  document.getElementById('s6-slider').value=0;
+  onArmSlider('s6',0);
+  log('arm joints centered');
+}
+
+// ---- Manual mode S1/S2 ----
+function toggleManual(){
+  isManual=!isManual;
+  document.getElementById('mode-toggle').classList.toggle('active',isManual);
+  document.getElementById('mode-label').textContent=isManual?'manual on':'manual mode';
+  ['pid-card','limits-card'].forEach(id=>document.getElementById(id).classList.toggle('dimmed',isManual));
+  fetch(`${API}/manual`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({manual_mode:isManual})});
+  log(isManual?'manual mode on':'tracking mode on',isManual?'w':'');
+}
+
+function sendManual(x,y){
+  manX=Math.round(x); manY=Math.round(y);
+  document.getElementById('man-x').value=manX; document.getElementById('man-y').value=manY;
+  document.getElementById('man-x-val').textContent=manX+'°'; document.getElementById('man-y-val').textContent=manY+'°';
+  updateJoystickThumb(manX,manY);
+  clearTimeout(sendThrottle);
+  sendThrottle=setTimeout(()=>{
+    fetch(`${API}/manual`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x:manX,y:manY})});
+  },20);
+}
+
+function centerPanTilt(){ sendManual(90,90); log('S1+S2 centered'); }
+
+// ---- Joystick ----
+const pad=document.getElementById('joystick-pad'), thumb=document.getElementById('joystick-thumb');
+let dragging=false;
+function padAngles(e){
+  const r=pad.getBoundingClientRect();
+  const cx=e.touches?e.touches[0].clientX:e.clientX, cy=e.touches?e.touches[0].clientY:e.clientY;
+  const px=Math.max(0,Math.min(1,(cx-r.left)/r.width)), py=Math.max(0,Math.min(1,(cy-r.top)/r.height));
+  const mnX=parseFloat(document.getElementById('min-x').value)||0, mxX=parseFloat(document.getElementById('max-x').value)||180;
+  const mnY=parseFloat(document.getElementById('min-y').value)||0, mxY=parseFloat(document.getElementById('max-y').value)||180;
+  return [mnX+px*(mxX-mnX), mxY-py*(mxY-mnY)];
+}
+function updateJoystickThumb(ax,ay){
+  const mnX=parseFloat(document.getElementById('min-x').value)||0, mxX=parseFloat(document.getElementById('max-x').value)||180;
+  const mnY=parseFloat(document.getElementById('min-y').value)||0, mxY=parseFloat(document.getElementById('max-y').value)||180;
+  thumb.style.left=((ax-mnX)/(mxX-mnX)*100)+'%';
+  thumb.style.top=((1-(ay-mnY)/(mxY-mnY))*100)+'%';
+}
+pad.addEventListener('mousedown', e=>{dragging=true;if(isManual){const[a,b]=padAngles(e);sendManual(a,b);}});
+pad.addEventListener('touchstart',e=>{dragging=true;if(isManual){const[a,b]=padAngles(e);sendManual(a,b);}},{passive:true});
+window.addEventListener('mouseup', ()=>dragging=false);
+window.addEventListener('touchend',()=>dragging=false);
+window.addEventListener('mousemove',e=>{if(dragging&&isManual){const[a,b]=padAngles(e);sendManual(a,b);}});
+window.addEventListener('touchmove',e=>{if(dragging&&isManual){const[a,b]=padAngles(e);sendManual(a,b);}},{passive:true});
+document.getElementById('man-x').addEventListener('input',function(){
+  manX=parseInt(this.value); document.getElementById('man-x-val').textContent=manX+'°'; updateJoystickThumb(manX,manY);
+  if(isManual) fetch(`${API}/manual`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x:manX,y:manY})});
+});
+document.getElementById('man-y').addEventListener('input',function(){
+  manY=parseInt(this.value); document.getElementById('man-y-val').textContent=manY+'°'; updateJoystickThumb(manX,manY);
+  if(isManual) fetch(`${API}/manual`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({x:manX,y:manY})});
+});
+
+// ---- PID params ----
+async function sendParams(){
+  const body={Kp:parseFloat(document.getElementById('kp-num').value),Kd:parseFloat(document.getElementById('kd-num').value),
+    deadzone:parseFloat(document.getElementById('dz-num').value),min_x:parseFloat(document.getElementById('min-x').value),
+    max_x:parseFloat(document.getElementById('max-x').value),min_y:parseFloat(document.getElementById('min-y').value),
+    max_y:parseFloat(document.getElementById('max-y').value),
+    s3_tilt_ratio: parseFloat(document.getElementById('s3r-num').value),
+    s4_tilt_ratio: parseFloat(document.getElementById('s4r-num').value),};
+  try{
+    await fetch(`${API}/update`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    ['save-ok','save-ok2'].forEach(id=>{const el=document.getElementById(id);el.style.opacity=1;setTimeout(()=>el.style.opacity=0,1200);});
+    log('params applied — Kp='+body.Kp.toFixed(3)+' Kd='+body.Kd.toFixed(3));
+  }catch(e){log('send failed: '+e.message,'e');}
+  
+}
+
+// ---- Arcs ----
+function pxy(cx,cy,r,d){const a=(d-180)*Math.PI/180;return[cx+r*Math.cos(a),cy+r*Math.sin(a)];}
+function ap(cx,cy,r,s,e){const[x1,y1]=pxy(cx,cy,r,s),[x2,y2]=pxy(cx,cy,r,e);return`M ${x1} ${y1} A ${r} ${r} 0 ${e-s>180?1:0} 1 ${x2} ${y2}`;}
+function updateArcs(sx,sy){
+  document.getElementById('arc-track-x').setAttribute('d',ap(50,55,26,0,180));
+  document.getElementById('arc-fill-x').setAttribute('d',ap(50,55,26,0,Math.round(sx)));
+  document.getElementById('arc-track-y').setAttribute('d',ap(180,55,26,0,180));
+  document.getElementById('arc-fill-y').setAttribute('d',ap(180,55,26,0,Math.round(sy)));
+  document.getElementById('s3r-num').value = s.s3_tilt_ratio;
+  document.getElementById('s3r-slider').value = s.s3_tilt_ratio;
+  document.getElementById('s4r-num').value = s.s4_tilt_ratio;
+  document.getElementById('s4r-slider').value = s.s4_tilt_ratio;  
+}
+
+// ---- Sparkline ----
+function drawSparkline(){
+  const cv=document.getElementById('sparkline'),ctx=cv.getContext('2d'),W=cv.width,H=cv.height;
+  ctx.clearRect(0,0,W,H);
+  const all=[...errorHistory.x,...errorHistory.y]; if(!all.length)return;
+  const mx=Math.max(80,...all.map(Math.abs));
+  function line(data,color){
+    if(data.length<2)return; ctx.beginPath();ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.lineJoin='round';
+    data.forEach((v,i)=>{const x=(i/(MAX_HIST-1))*W,y=H/2-(v/mx)*(H/2-6);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);});
+    ctx.stroke();
+  }
+  ctx.beginPath();ctx.strokeStyle='rgba(255,255,255,0.06)';ctx.lineWidth=0.5;ctx.moveTo(0,H/2);ctx.lineTo(W,H/2);ctx.stroke();
+  line(errorHistory.x,'#5DCAA5'); line(errorHistory.y,'#378ADD');
+  ctx.font='10px monospace'; ctx.fillStyle='#5DCAA5';ctx.fillText('err X',6,14); ctx.fillStyle='#378ADD';ctx.fillText('err Y',6,26);
+}
+
+// ---- Log ----
+function log(msg,type=''){
+  const box=document.getElementById('logbox'),ts=new Date().toTimeString().slice(0,8);
+  const line=document.createElement('div');
+  line.innerHTML=`<span class="tag ${type}">[${ts}]</span>${msg}`;
+  box.appendChild(line); if(box.children.length>60)box.removeChild(box.firstChild); box.scrollTop=box.scrollHeight;
+}
+
+// ---- Poll ----
+async function poll(){
+  try{
+    const s=await(await fetch(`${API}/state`)).json();
+    document.getElementById('dot').classList.add('ok');
+    document.getElementById('conn-label').textContent='connected';
+    const sx=s.servo_x??90, sy=s.servo_y??90;
+    document.getElementById('angle-x').textContent=sx.toFixed(1);
+    document.getElementById('angle-y').textContent=sy.toFixed(1);
+    updateArcs(sx,sy);
+    errorHistory.x.push((sx-lastSX)*20); if(errorHistory.x.length>MAX_HIST)errorHistory.x.shift();
+    errorHistory.y.push((sy-lastSY)*20); if(errorHistory.y.length>MAX_HIST)errorHistory.y.shift();
+    lastSX=sx; lastSY=sy; drawSparkline();
+
+    // Sync s3-s6 display from Python state
+    ['s3','s4','s5','s6'].forEach(k=>{
+      const v=s[k]??90;
+      document.getElementById('angle-'+k).textContent=Math.round(v);
+    });
+
+    const badge=document.getElementById('tracking-badge'),dot=document.getElementById('track-dot'),lbl=document.getElementById('track-label');
+    if(s.manual_mode){badge.className='tracking-badge manual-active';dot.style.background='#EF9F27';lbl.textContent='manual';}
+    else if(s.tracking){badge.className='tracking-badge active';dot.style.background='#5DCAA5';lbl.textContent='tracking';}
+    else{badge.className='tracking-badge';dot.style.background='#888780';lbl.textContent='no target';}
+
+    if(!poll.synced){
+      document.getElementById('kp-num').value=s.Kp; document.getElementById('kp-slider').value=s.Kp;
+      document.getElementById('kd-num').value=s.Kd; document.getElementById('kd-slider').value=s.Kd;
+      document.getElementById('dz-num').value=s.deadzone; document.getElementById('dz-slider').value=s.deadzone;
+      document.getElementById('min-x').value=s.min_x; document.getElementById('max-x').value=s.max_x;
+      document.getElementById('min-y').value=s.min_y; document.getElementById('max-y').value=s.max_y;
+      poll.synced=true; log('synced with tracker'); updateJoystickThumb(90,90);
+    }
+  }catch(e){
+    document.getElementById('dot').classList.remove('ok');
+    document.getElementById('conn-label').textContent='offline — is tracker.py running?';
+    poll.synced=false;
+  }
+}
+poll.synced=false; poll(); setInterval(poll,150);
+log('tuner started — waiting for tracker.py on port 5050');
+
+// =================================================================
+// THREE.JS  6-DOF ARM
+// =================================================================
+let scene, renderer, threeCamera;
+let panGroup, tiltGroup1, tiltGroup2, tiltGroup3, wristGroup;
+let camRef=null;
+let orbitTheta=0.65, orbitPhi=1.1, orbitRadius=6.0;
+let orbitDragging=false, orbitLastX=0, orbitLastY=0;
+
+// Target rotation values for smooth interpolation
+let tPan=0, tTilt1=0, tTilt2=0, tTilt3=0, tWrist=0, tGrip=0;
+// Claw finger meshes
+let fingerL=null, fingerR=null;
+
+function mat(color, shine=60){ return new THREE.MeshPhongMaterial({color,shininess:shine}); }
+
+function buildArm(){
+  if(panGroup) scene.remove(panGroup);
+  camRef=null; fingerL=null; fingerR=null;
+
+  const seg1=parseFloat(document.getElementById('cal-seg1').value)||1.0;
+  const seg2=parseFloat(document.getElementById('cal-seg2').value)||1.05;
+  const seg3=parseFloat(document.getElementById('cal-seg3').value)||1.0;
+  const seg4=parseFloat(document.getElementById('cal-seg4').value)||0.7;
+
+  // Camera offset in Three.js units (scaled down from cm: assume 1 unit ≈ 10cm)
+  // 13cm back = 0.13 relative units × scale factor
+  const scale=parseFloat(document.getElementById('coord-scale').value)||10;
+  const camBack=13/scale, camUp=5/scale;
+
+  const mBase=mat(0x444441,20), mArm=mat(0x5DCAA5,60), mElbow=mat(0xAFA9EC,60);
+  const mWrist=mat(0xF0997B,60), mClaw=mat(0xED93B1,50), mJoint=mat(0x888780,80);
+  const mCamBody=mat(0xEF9F27,50), mLens=mat(0x1a1a1e,120);
+
+  // Base
+  const base=new THREE.Mesh(new THREE.CylinderGeometry(0.38,0.48,0.14,20),mBase);
+  base.position.y=0.07; base.castShadow=true; base.receiveShadow=true; scene.add(base);
+
+  // === Pan group (Y rotation = S1) ===
+  panGroup=new THREE.Group(); panGroup.position.y=0.14; scene.add(panGroup);
+
+  const hub=new THREE.Mesh(new THREE.CylinderGeometry(0.13,0.16,0.18,14),mJoint);
+  hub.position.y=0.09; hub.castShadow=true; panGroup.add(hub);
+
+  // Upper arm — vertical, S2 tilt at top
+  const ua=new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.1,seg1,10),mArm);
+  ua.position.y=0.18+seg1/2; ua.castShadow=true; panGroup.add(ua);
+
+  // === Tilt group 1 (Z rotation = S2) ===
+  tiltGroup1=new THREE.Group(); tiltGroup1.position.y=0.18+seg1; panGroup.add(tiltGroup1);
+
+  const j1=new THREE.Mesh(new THREE.SphereGeometry(0.12,12,8),mJoint); j1.castShadow=true; tiltGroup1.add(j1);
+
+  // Elbow segment — horizontal from S2 joint
+  const ea=new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.09,seg2,10),mElbow);
+  ea.rotation.z=Math.PI/2; ea.position.x=seg2/2; ea.castShadow=true; tiltGroup1.add(ea);
+
+  // === Tilt group 2 (Z rotation = S3 elbow) ===
+  tiltGroup2=new THREE.Group(); tiltGroup2.position.x=seg2; tiltGroup1.add(tiltGroup2);
+
+  const j2=new THREE.Mesh(new THREE.SphereGeometry(0.11,12,8),mJoint); j2.castShadow=true; tiltGroup2.add(j2);
+
+  const wb=new THREE.Mesh(new THREE.CylinderGeometry(0.065,0.08,seg3,10),mWrist);
+  wb.rotation.z=Math.PI/2; wb.position.x=seg3/2; wb.castShadow=true; tiltGroup2.add(wb);
+
+  // === Tilt group 3 (Z rotation = S4 wrist tilt) ===
+  tiltGroup3=new THREE.Group(); tiltGroup3.position.x=seg3; tiltGroup2.add(tiltGroup3);
+
+  const j3=new THREE.Mesh(new THREE.SphereGeometry(0.10,12,8),mJoint); j3.castShadow=true; tiltGroup3.add(j3);
+
+  // Camera ref — 13cm back (−X), 5cm up (+Y) from claw tip
+  camRef=new THREE.Object3D();
+  camRef.position.set(seg4-camBack, camUp, 0);
+  tiltGroup3.add(camRef);
+
+  // Camera body mounted on tiltGroup3 (does NOT rotate with claw)
+  const camBody=new THREE.Mesh(new THREE.BoxGeometry(0.18,0.13,0.22),mCamBody);
+  camBody.position.set(seg4-camBack, camUp, 0); camBody.castShadow=true; tiltGroup3.add(camBody);
+  const lens=new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.05,0.09,10),mLens);
+  lens.rotation.z=Math.PI/2; lens.position.set(seg4-camBack+0.14, camUp, 0); tiltGroup3.add(lens);
+  // FOV cone
+  const cone=new THREE.Mesh(new THREE.ConeGeometry(0.16,0.35,12,1,true),new THREE.MeshBasicMaterial({color:0xfac775,transparent:true,opacity:0.07,side:THREE.DoubleSide}));
+  cone.rotation.z=-Math.PI/2; cone.position.set(seg4-camBack+0.33,camUp,0); tiltGroup3.add(cone);
+
+  // === Wrist group (X rotation = S5 claw rotate) ===
+  wristGroup=new THREE.Group(); wristGroup.position.x=seg4; tiltGroup3.add(wristGroup);
+
+  // Claw base
+  const cb=new THREE.Mesh(new THREE.BoxGeometry(0.22,0.12,0.16),mClaw);
+  cb.castShadow=true; wristGroup.add(cb);
+
+  // Claw fingers (L and R, spread on Z axis)
+  fingerL=new THREE.Mesh(new THREE.BoxGeometry(0.22,0.06,0.05),mClaw);
+  fingerL.position.set(0,0,-0.09); fingerL.castShadow=true; wristGroup.add(fingerL);
+  fingerR=new THREE.Mesh(new THREE.BoxGeometry(0.22,0.06,0.05),mClaw);
+  fingerR.position.set(0,0, 0.09); fingerR.castShadow=true; wristGroup.add(fingerR);
+}
+
+function initThree(){
+  const canvas = document.getElementById('arm-canvas');
+  const W = 272, H = 260;
+  canvas.width = W; canvas.height = H;
+  canvas.style.width = W+'px'; canvas.style.height = H+'px';
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x1a1a20);
+
+  threeCamera = new THREE.PerspectiveCamera(45, W/H, 0.01, 200);
+  threeCamera.position.set(3, 3, 5);
+  threeCamera.lookAt(0, 1, 0);
+
+  renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+  renderer.setSize(W, H, false);
+  renderer.setPixelRatio(1);
+  renderer.shadowMap.enabled = true;
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+  dir.position.set(5, 10, 7); dir.castShadow = true; scene.add(dir);
+  const fill = new THREE.DirectionalLight(0x88aaff, 0.4);
+  fill.position.set(-4, 2, -3); scene.add(fill);
+
+  scene.add(new THREE.GridHelper(7, 14, 0x333330, 0x252522));
+  scene.add(new THREE.AxesHelper(1.5));
+
+  buildArm();
+
+  // Force immediate render
+  renderer.render(scene, threeCamera);
+
+  // Orbit controls
+  canvas.addEventListener('mousedown', e=>{orbitDragging=true;orbitLastX=e.clientX;orbitLastY=e.clientY;});
+  canvas.addEventListener('touchstart',e=>{orbitDragging=true;orbitLastX=e.touches[0].clientX;orbitLastY=e.touches[0].clientY;},{passive:true});
+  window.addEventListener('mouseup', ()=>orbitDragging=false);
+  window.addEventListener('touchend',()=>orbitDragging=false);
+  window.addEventListener('mousemove',e=>{
+    if(!orbitDragging)return;
+    orbitTheta -= (e.clientX-orbitLastX)*0.012;
+    orbitPhi = Math.max(0.15, Math.min(Math.PI*0.82, orbitPhi+(e.clientY-orbitLastY)*0.012));
+    orbitLastX=e.clientX; orbitLastY=e.clientY;
+    updateOrbitCamera();
+  });
+  window.addEventListener('touchmove',e=>{
+    if(!orbitDragging)return;
+    orbitTheta -= (e.touches[0].clientX-orbitLastX)*0.012;
+    orbitPhi = Math.max(0.15, Math.min(Math.PI*0.82, orbitPhi+(e.touches[0].clientY-orbitLastY)*0.012));
+    orbitLastX=e.touches[0].clientX; orbitLastY=e.touches[0].clientY;
+    updateOrbitCamera();
+  },{passive:true});
+  canvas.addEventListener('wheel',e=>{
+    orbitRadius = Math.max(2, Math.min(14, orbitRadius+e.deltaY*0.01));
+    updateOrbitCamera(); e.preventDefault();
+  },{passive:false});
+
+  animateThree();
+}
+
+function updateOrbitCamera(){
+  threeCamera.position.set(
+    orbitRadius*Math.sin(orbitPhi)*Math.sin(orbitTheta),
+    orbitRadius*Math.cos(orbitPhi)+1.2,
+    orbitRadius*Math.sin(orbitPhi)*Math.cos(orbitTheta)
+  );
+  threeCamera.lookAt(new THREE.Vector3(0, 1.0, 0));
+  threeCamera.updateProjectionMatrix();
+}
+
+function lerp(a,b,t){ return a+(b-a)*t; }
+
+function animateThree(){
+  requestAnimationFrame(animateThree);
+  if(!scene||!renderer||!threeCamera) return;
+  if(!panGroup||!tiltGroup1||!tiltGroup2||!tiltGroup3||!wristGroup) return;
+
+  const sx  = parseFloat(document.getElementById('angle-x').textContent)||90;
+  const sy  = parseFloat(document.getElementById('angle-y').textContent)||90;
+  const ss3 = parseFloat(document.getElementById('angle-s3').textContent)||90;
+  const ss4 = parseFloat(document.getElementById('angle-s4').textContent)||90;
+  const ss5 = parseFloat(document.getElementById('angle-s5').textContent)||90;
+  const ss6 = parseFloat(document.getElementById('angle-s6').textContent)||0;
+
+  const panOff  = (parseFloat(document.getElementById('cal-pan').value)||0)*Math.PI/180;
+  const tiltOff = (parseFloat(document.getElementById('cal-tilt').value)||0)*Math.PI/180;
+  const D = Math.PI/180;
+
+  const tPan   =  (sx-90)*D + panOff;
+  const tTilt1 =  (sy-90)*D + tiltOff;
+  const tTilt2 = -(ss3-90)*D;
+  const tTilt3 = -(ss4)*D*0.5;
+  const tWrist =  (ss5-90)*D;
+  const tGrip  =  ss6/180;
+
+  const sp = 0.15;
+  panGroup.rotation.y   = lerp(panGroup.rotation.y,   tPan,   sp);
+  tiltGroup1.rotation.z = lerp(tiltGroup1.rotation.z, tTilt1, sp);
+  tiltGroup2.rotation.z = lerp(tiltGroup2.rotation.z, tTilt2, sp);
+  tiltGroup3.rotation.z = lerp(tiltGroup3.rotation.z, tTilt3, sp);
+  wristGroup.rotation.x = lerp(wristGroup.rotation.x, tWrist, sp);
+
+  if(fingerL&&fingerR){
+    const spread = 0.04+tGrip*0.45;
+    fingerL.position.z = -spread; fingerR.position.z = spread;
+  }
+
+  scene.updateMatrixWorld();
+  if(camRef){
+    const wp = new THREE.Vector3(); camRef.getWorldPosition(wp);
+    const sc = parseFloat(document.getElementById('coord-scale').value)||10;
+    const rx = wp.x*sc, ry = (wp.y-0.14)*sc, rz = wp.z*sc;
+    const dist = Math.sqrt(rx*rx+ry*ry+rz*rz);
+    document.getElementById('coord-x').textContent = rx.toFixed(1);
+    document.getElementById('coord-y').textContent = ry.toFixed(1);
+    document.getElementById('coord-z').textContent = rz.toFixed(1);
+    document.getElementById('coord-dist').textContent = dist.toFixed(1);
+  }
+
+  renderer.render(scene, threeCamera);
+}
+
+window.addEventListener('load', ()=>{
+  setTimeout(()=>{
+    if(typeof THREE !== 'undefined') initThree();
+    else log('Three.js failed to load — check network','e');
+  }, 150);
+});
+</script>
+</body>
+</html>
